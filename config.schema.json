@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "service_url": {
+      "type": "string",
+      "title": "小镇服务地址",
+      "description": "共享小镇服务的根地址，只接受 http/https，不得内嵌账号或口令。",
+      "default": "http://127.0.0.1:8800"
+    },
+    "pairing_token": {
+      "type": "string",
+      "title": "配对令牌",
+      "description": "网页配对后由小镇服务签发，用于证明这个 Bot 绑定的角色。留空表示保留原值；清除需显式操作。",
+      "default": "",
+      "format": "password",
+      "writeOnly": true
+    },
+    "poll_interval_seconds": {
+      "type": "integer",
+      "title": "观察轮询间隔（秒）",
+      "description": "两次拉取小镇观察之间的间隔，越小越实时、请求越多。",
+      "default": 15,
+      "minimum": 5,
+      "maximum": 300
+    },
+    "request_timeout_seconds": {
+      "type": "integer",
+      "title": "单次请求超时（秒）",
+      "description": "单次调用小镇服务的超时；超时后工具回执为“结果未确认”，不会自动重试。",
+      "default": 8,
+      "minimum": 2,
+      "maximum": 30
+    },
+    "stop_budget_seconds": {
+      "type": "integer",
+      "title": "停止等待预算（秒）",
+      "description": "停用插件时等待已接受工作结束的预算；到期未排空会报告未完成并保留资源。",
+      "default": 20,
+      "minimum": 5,
+      "maximum": 60
+    }
+  }
+}

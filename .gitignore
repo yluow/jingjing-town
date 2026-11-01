@@ -1,0 +1,24 @@
+# Private configuration and backups
+config.json
+.config-backups/
+.env
+.env.*
+!.env.example
+
+# Local runtime and user data
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+data/
+cache/
+*.tmp
+.tmp-tests/
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

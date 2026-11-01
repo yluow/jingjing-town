@@ -1,0 +1,7 @@
+{
+  "service_url": "http://127.0.0.1:8800",
+  "pairing_token": "",
+  "poll_interval_seconds": 15,
+  "request_timeout_seconds": 8,
+  "stop_budget_seconds": 20
+}

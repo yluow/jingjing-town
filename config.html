@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鲸鲸小镇 · 连接配置</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #12141a;
+    --card: #1a1d25;
+    --line: #2b2f3a;
+    --text: #e6e8ee;
+    --muted: #9aa1b1;
+    --accent: #5b9dff;
+    --ok: #47c07a;
+    --warn: #e0a33c;
+    --err: #e46464;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+  .sub { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .field { margin-bottom: 14px; }
+  .field:last-of-type { margin-bottom: 4px; }
+  label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 13px; }
+  label .tag { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
+  input {
+    width: 100%;
+    padding: 8px 10px;
+    background: #0f1116;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font: inherit;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  input:disabled { opacity: .55; }
+  .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1 1 auto; }
+  button {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: #232734;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+  #status { margin: 0 0 12px; padding: 8px 10px; border-radius: 8px; font-size: 13px; background: #202634; color: var(--muted); }
+  #status.ok { color: var(--ok); }
+  #status.warn { color: var(--warn); }
+  #status.err { color: var(--err); }
+  code { font-family: Consolas, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>鲸鲸小镇</h1>
+<p class="sub">这里只管理「这个 Bot 如何连到小镇服务」。小镇页面、角色设定与世界观察都在独立的小镇网页里。</p>
+
+<div id="status">正在读取已保存的配置…</div>
+
+<div class="card">
+  <div class="field">
+    <label for="service_url">小镇服务地址</label>
+    <input id="service_url" type="text" spellcheck="false" autocomplete="off"
+           placeholder="http://127.0.0.1:8800" disabled>
+    <p class="hint">只接受 http/https，不得内嵌账号或口令。本页不会向这个地址发请求。</p>
+  </div>
+
+  <div class="field">
+    <label for="pairing_token">配对令牌<span class="tag">私密，不会回显</span></label>
+    <div class="row">
+      <input id="pairing_token" type="password" autocomplete="new-password"
+             placeholder="已保存则留空表示保留原值" disabled>
+      <button id="clear_token" type="button" disabled>清除</button>
+    </div>
+    <p class="hint">在网页里完成配对后由小镇服务签发。留空=保留原值；只有点「清除」才会删除。</p>
+  </div>
+
+  <div class="field">
+    <label for="poll_interval_seconds">观察轮询间隔（秒）</label>
+    <input id="poll_interval_seconds" type="number" min="5" max="300" step="1" disabled>
+  </div>
+
+  <div class="field">
+    <label for="request_timeout_seconds">单次请求超时（秒）</label>
+    <input id="request_timeout_seconds" type="number" min="2" max="30" step="1" disabled>
+    <p class="hint">超时后工具回执为「结果未确认」，不会自动重试。</p>
+  </div>
+
+  <div class="field">
+    <label for="stop_budget_seconds">停止等待预算（秒）</label>
+    <input id="stop_budget_seconds" type="number" min="5" max="60" step="1" disabled>
+    <p class="hint">停用插件时等待已接受工作结束的预算；到期未排空会报告未完成。</p>
+  </div>
+
+  <div class="actions">
+    <button id="save" class="primary" type="button" disabled>保存</button>
+    <button id="reload" type="button" disabled>重新读取</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var FIELDS = [
+    'service_url',
+    'pairing_token',
+    'poll_interval_seconds',
+    'request_timeout_seconds',
+    'stop_budget_seconds'
+  ];
+  var NUMERIC = {
+    poll_interval_seconds: [5, 300],
+    request_timeout_seconds: [2, 30],
+    stop_budget_seconds: [5, 60]
+  };
+
+  var revision = null;
+  var snapshot = {};      // 上次读回的值，用来算差异
+  var dirty = false;      // 用户改过未保存的表单
+  var clearToken = false; // 显式清除标记
+  var ready = false;
+  var pendingSave = false;
+
+  var statusEl = document.getElementById('status');
+  var saveBtn = document.getElementById('save');
+  var reloadBtn = document.getElementById('reload');
+  var tokenInput = document.getElementById('pairing_token');
+  var clearBtn = document.getElementById('clear_token');
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = kind || '';
+  }
+
+  function setEnabled(on) {
+    FIELDS.forEach(function (name) {
+      var el = document.getElementById(name);
+      if (el) { el.disabled = !on; }
+    });
+    clearBtn.disabled = !on;
+    saveBtn.disabled = !on;
+    reloadBtn.disabled = !on;
+  }
+
+  function post(payload) {
+    // 宿主只接受当前 iframe 的消息；targetOrigin 固定 '*' 是沙箱同源策略下的既有契约
+    parent.postMessage(payload, '*');
+  }
+
+  function requestConfig() {
+    post({ type: 'telyincore:config:get' });
+  }
+
+  function applyState(config) {
+    revision = config && config.revision != null ? config.revision : revision;
+    var fields = (config && config.fields) || [];
+    var values = {};
+    fields.forEach(function (field) {
+      if (!field || !Array.isArray(field.path)) { return; }
+      values[field.path.join('.')] = field.value;
+    });
+
+    if (dirty) {
+      // 后台刷新不覆盖正在编辑的内容（前端页面异步加载约定）
+      setStatus('已保存的配置在别处被更新；为免覆盖你正在编辑的内容，本页未重新填充。点「重新读取」丢弃草稿并刷新。', 'warn');
+      ready = true;
+      setEnabled(true);
+      saveBtn.disabled = true;
+      return;
+    }
+
+    snapshot = {};
+    FIELDS.forEach(function (name) {
+      if (name === 'pairing_token') { return; }
+      var value = values[name];
+      if (value === undefined || value === null) { value = ''; }
+      snapshot[name] = String(value);
+      var el = document.getElementById(name);
+      if (el) { el.value = snapshot[name]; }
+    });
+    // 私密字段不回显：永远留空，留空即保留原值
+    tokenInput.value = '';
+    clearToken = false;
+    ready = true;
+    setEnabled(true);
+    saveBtn.disabled = true;
+    setStatus('已读取当前配置。', 'ok');
+  }
+
+  function collectChanges() {
+    var changes = [];
+    FIELDS.forEach(function (name) {
+      if (name === 'pairing_token') { return; }
+      var el = document.getElementById(name);
+      var value = (el.value || '').trim();
+      if (value !== snapshot[name]) {
+        if (NUMERIC[name]) {
+          var number = Number(value);
+          var low = NUMERIC[name][0];
+          var high = NUMERIC[name][1];
+          if (!isFinite(number) || Math.floor(number) !== number || number < low || number > high) {
+            throw new Error(name + ' 必须是 ' + low + ' 到 ' + high + ' 之间的整数');
+          }
+          changes.push({ path: [name], value: number });
+        } else {
+          changes.push({ path: [name], value: value });
+        }
+      }
+    });
+
+    if (clearToken) {
+      changes.push({ path: ['pairing_token'], value: '' });
+    } else if (tokenInput.value !== '') {
+      changes.push({ path: ['pairing_token'], value: tokenInput.value });
+    }
+    return changes;
+  }
+
+  function onSave() {
+    if (!ready || pendingSave) { return; }
+    var changes;
+    try {
+      changes = collectChanges();
+    } catch (err) {
+      setStatus('未保存：' + err.message, 'err');
+      return;
+    }
+    if (!changes.length) {
+      setStatus('没有需要保存的改动。', 'ok');
+      return;
+    }
+    pendingSave = true;
+    saveBtn.disabled = true;
+    setStatus('正在保存…');
+    post({ type: 'telyincore:config:save', revision: revision, changes: changes });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== parent) { return; }  // 只信任父框架
+    var data = event.data;
+    if (!data || typeof data !== 'object') { return; }
+
+    if (data.type === 'telyincore:config:state') {
+      applyState(data.config || {});
+      return;
+    }
+
+    if (data.type === 'telyincore:config:saved') {
+      pendingSave = false;
+      if (data.ok) {
+        dirty = false;
+        clearToken = false;
+        tokenInput.value = '';
+        setStatus('已保存，正在重新读取…', 'ok');
+        requestConfig();
+      } else {
+        setEnabled(true);
+        saveBtn.disabled = false;
+        setStatus('保存失败：' + (data.error || '宿主未返回原因，未写入任何值'), 'err');
+      }
+    }
+  });
+
+  FIELDS.forEach(function (name) {
+    var el = document.getElementById(name);
+    if (!el) { return; }
+    el.addEventListener('input', function () {
+      dirty = true;
+      saveBtn.disabled = false;
+      setStatus('有未保存的改动。');
+    });
+  });
+
+  clearBtn.addEventListener('click', function () {
+    clearToken = true;
+    dirty = true;
+    tokenInput.value = '';
+    saveBtn.disabled = false;
+    setStatus('已标记清除配对令牌，保存后生效。', 'warn');
+  });
+
+  saveBtn.addEventListener('click', onSave);
+  reloadBtn.addEventListener('click', function () {
+    dirty = false;
+    clearToken = false;
+    saveBtn.disabled = true;
+    setStatus('正在重新读取…');
+    requestConfig();
+  });
+
+  // 首次读回前禁止编辑；5 秒内没有回执说明本页不是通过宿主配置入口打开的
+  setTimeout(function () {
+    if (!ready) {
+      setStatus('未收到宿主的配置回执。请从 TelyinCore 的插件配置入口打开本页。', 'err');
+    }
+  }, 5000);
+
+  if (window.parent === window) {
+    setStatus('本页需要作为插件配置页嵌入宿主使用。', 'err');
+  } else {
+    requestConfig();
+  }
+})();
+</script>
+</body>
+</html>
