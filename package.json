@@ -1,6 +1,6 @@
 {
   "name": "jingjing-town",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "yluow",
   "main": "index.py",
   "description": "鲸鲸小镇：把当前 Bot 接入一个共享的像素小镇。插件只做连接与搬运——把世界观察经 push_event 交给宿主主循环，并注册 town_observe / town_act / town_say 三个工具，让角色在小镇里观察、行动和发言；世界状态、时钟与结算由独立的小镇服务负责。",

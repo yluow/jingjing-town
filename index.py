@@ -375,13 +375,20 @@ class TownPlugin(object):
         )
         act_def = ToolDef(
             name=TOOL_PREFIX + "act",
-            description="向鲸鲸小镇提交一次世界行动意图，由小镇服务校验持有关系、距离、条件与次数后结算。",
+            description=(
+                "向鲸鲸小镇提交一次行动，由小镇服务结算。"
+                "常用动作：move（detail 里给 x/y 坐标）、look、wait；"
+                "do（detail.what 写你实际做了什么，例如 wake_up，规则判定只认这个）；"
+                "stance（detail.rule_id + stance=comply/refuse/defer，对社会规则表态）；"
+                "read_board（看布告栏，补齐对现有规则的了解）；"
+                "tell_rule（detail.rule_id + detail.target，把规则讲给另一个角色）。"
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "动作标识，例如 move / pick_up / give / use",
+                        "description": "动作标识：move / look / wait / do / stance / read_board / tell_rule",
                     },
                     "target": {
                         "type": "string",
@@ -588,7 +595,7 @@ class TownPlugin(object):
         headers = {
             "Accept": "application/json",
             "Authorization": "Bearer " + cfg["pairing_token"],
-            "User-Agent": "%s/%s" % (PLUGIN_NAME, "0.1.0"),
+            "User-Agent": "%s/%s" % (PLUGIN_NAME, "0.1.1"),
         }
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")

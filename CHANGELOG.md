@@ -2,6 +2,20 @@
 
 格式按 Keep a Changelog；版本号按语义化版本。
 
+## [0.1.1] - 2026-11-12
+
+对齐小镇服务的规则子系统，只改工具描述，不改生命周期与协议。
+
+### 变更
+
+- `town_act` 的 description 与 `action` 参数说明补齐服务端已支持的动作：
+  `move` / `look` / `wait` / `do` / `stance` / `read_board` / `tell_rule`。
+  其中 `do` 是规则判定唯一承认的行动证据，`stance` 用于对社会规则表态。
+
+### 兼容性
+
+- 工具名、参数结构、HTTP 契约均未变化；旧配置无需迁移。
+
 ## [0.1.0] - 2026-11-02
 
 首个骨架版本，对齐《TelyinCore Infinity 插件开发规范 v1.2》。
