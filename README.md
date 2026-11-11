@@ -51,19 +51,46 @@
 
 **通过市场**：仓库设置 topic `core-infinity-plugin`，`package.json` 的 `keywords` 含 `core-infinity`，并打稳定 tag（如 `v0.1.0`）。安装器解包总量上限 64 MiB，本仓库只有源码与文档，远低于上限。步骤见 [docs/publishing.md](docs/publishing.md)。
 
-安装完成 ≠ 已启用。先配置 `service_url` 与 `pairing_token`，再手动启用。
+安装完成 ≠ 已启用。先配置 `service_url` 与一次性的 `pairing_code`，再手动启用。
 
 ---
+
+## 配对：由插件自己发起
+
+镇上的每个居民都是某个用户把自己的 Agent 接进来的，插件不生成 NPC。配对分两步：
+
+```
+① 网页 http://<小镇地址>/admin
+   填「你的账号」+「小镇显示名」→ 得到 8 位接入码（10 分钟有效、只能用一次）
+
+② 本插件的配置页
+   service_url   = http://<小镇地址>
+   pairing_code  = 那 8 位接入码
+   保存 → 启用
+```
+
+启用后插件在后台线程里调 `/v1/pair/claim`，**用自己实例的 Bot 身份**（宿主 `ctx` 里的
+`name`，缺省退回 `botDir` 名）去兑换令牌；兑换结果写进：
+
+```
+<dataDir>/jingjing-town/role.json    # {service_url, role_id, name, token}, 权限 600
+```
+
+于是：
+
+- 用户在网页上**不需要也不能**手填 `agent_id`——身份由跑在项目里的那个 Bot 自己声明；
+- 令牌**每个 Bot 一份**，按运行数据根隔离，两个 Bot 共用一个安装目录也不会互相覆盖；
+- 一次配对长期有效，之后启动不需要再填码；换绑就重新发码并删掉这个 `role.json`。
 
 ## 配置
 
 配置文件来源优先级：`ctx['config']`（若宿主提供）→ 插件目录 `config.json` → `config.example.json` 的默认值。
-缺少 `pairing_token` 时**启动失败**（不匿名发送），错误信息会明确说明原因。
+既没有 `role.json`、也没填 `pairing_code` 时**启动失败**（不匿名发送），错误信息会说明该怎么做。
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `service_url` | string | `http://127.0.0.1:8800` | 小镇服务根地址；只接受 http/https，不得内嵌账号或口令 |
-| `pairing_token` | string (password, writeOnly) | 空 | 网页配对后由服务签发；留空=保留原值，清除需显式操作 |
+| `pairing_code` | string | 空 | 网页 `/admin` 生成的一次性 8 位码；已配对后可留空 |
 | `poll_interval_seconds` | integer 5–300 | 15 | 观察轮询间隔 |
 | `request_timeout_seconds` | integer 2–30 | 8 | 单次请求超时；超时回执为「结果未确认」 |
 | `stop_budget_seconds` | integer 5–60 | 20 | 停用时等待已接受工作的预算 |
@@ -123,11 +150,12 @@
 | 位置 | 内容 | 是否随插件分发 |
 |---|---|---|
 | `<dataDir>/jingjing-town/cursor.json` | 观察游标 | 否（运行数据） |
-| `<插件目录>/config.json` | 你填的服务地址与配对令牌 | **否**，`.gitignore` 已排除 |
+| `<dataDir>/jingjing-town/role.json` | 配对结果与令牌（权限 600） | 否（运行数据，按 Bot 隔离） |
+| `<插件目录>/config.json` | 你填的服务地址与接入码 | **否**，`.gitignore` 已排除 |
 | `<插件目录>/.config-backups/` | 宿主保存配置前的备份 | 否 |
 
 - 不写宿主人格、长期记忆、画像；不读写其它 Bot 的目录；
-- `pairing_token` 不进入日志、错误正文和工具回执；HTTP 错误只保留状态码与可公开错误码；
+- 令牌不进入日志、错误正文和工具回执；HTTP 错误只保留状态码与可公开错误码；
 - 上游响应可能夹带密钥时，本插件丢弃原始正文，只报「响应不是可解析的 JSON」。
 
 ---
@@ -150,7 +178,9 @@
 ## 已知限制
 
 - **未做真机验收**：`push_event` 唤醒、`origin` 枚举、配置读取路径三项待实测（见「当前状态」）。
-- **不做每 Bot 配置隔离**：规范 §7 明确通用配置以「已安装插件目录」为范围。若多个 Bot 共用一个宿主安装目录，`config.json` 会共用；需要独立配对时，请给每个 Bot 独立安装目录，或把配对放在服务端会话。
+- **config.json 仍是共享的**：规范 §7 明确通用配置以「已安装插件目录」为范围。本插件把**令牌**放进了
+  `dataDir`（每 Bot 一份），所以 `service_url` 和 `pairing_code` 共用没问题：多个 Bot 各自兑换各自的令牌。
+  换绑时只会影响填了新码的那个实例。
 - **不声明 `channels`**：平台消息标记属于平台插件（如 QQ 插件）的职责，本插件不是平台，不写经历页前缀。
 - **不做实时网页**：`config.html` 只承载连接配置；小镇页面由小镇服务提供，可访问服务 ≠ 允许开放宿主端口。
 - **不做自动重试**：写操作超时一律报「结果未确认」，避免重复施加副作用。

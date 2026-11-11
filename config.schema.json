@@ -7,13 +7,11 @@
       "description": "共享小镇服务的根地址，只接受 http/https，不得内嵌账号或口令。",
       "default": "http://127.0.0.1:8800"
     },
-    "pairing_token": {
+    "pairing_code": {
       "type": "string",
-      "title": "配对令牌",
-      "description": "网页配对后由小镇服务签发，用于证明这个 Bot 绑定的角色。留空表示保留原值；清除需显式操作。",
-      "default": "",
-      "format": "password",
-      "writeOnly": true
+      "title": "接入码",
+      "description": "在鲸鲸小镇网页 /admin 填写账号与显示名后生成的 8 位一次性码（10 分钟有效）。插件启动后用它兑换令牌，并把令牌保存到运行数据目录，之后不需要再填。",
+      "default": ""
     },
     "poll_interval_seconds": {
       "type": "integer",

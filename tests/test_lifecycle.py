@@ -120,6 +120,18 @@ class TownHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/v1/me":
             self._send({"ok": True, "summary": "你在广场（D3 06:00）"})
             return
+        if method == "POST" and path == "/v1/pair/claim":
+            code = ((body or {}).get("code") or "").strip()
+            if code == "EXPIRED1":
+                self._send({"ok": False, "error": {"code": "code_expired", "message": "接入码已过期"}}, 410)
+                return
+            self._send({
+                "ok": True,
+                "role": {"role_id": "r_claimed", "name": "测试角色", "agent_id": (body or {}).get("agent_id")},
+                "pairing_token": "token-from-claim",
+                "replayed": False,
+            })
+            return
         if method == "POST" and path in ("/v1/act", "/v1/say"):
             detail = (body or {}).get("detail")
             delay = 0.0
@@ -194,7 +206,7 @@ class PluginTestBase(unittest.TestCase):
     def config(self, **overrides):
         cfg = {
             "service_url": self.server.base_url,
-            "pairing_token": self.TOKEN,
+            "pairing_code": "",
             "poll_interval_seconds": 5,
             "request_timeout_seconds": 2,
             "stop_budget_seconds": 5,
@@ -205,6 +217,19 @@ class PluginTestBase(unittest.TestCase):
     def write_config(self, cfg):
         with open(os.path.join(self.pkg_dir, "config.json"), "w", encoding="utf-8") as handle:
             json.dump(cfg, handle, ensure_ascii=False)
+
+    def seed_role(self, token=None, service_url=None):
+        """模拟"已经配对过"：把 role.json 放进 dataDir。"""
+        path = os.path.join(self.data_dir, index.PLUGIN_NAME, "role.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "service_url": service_url or self.server.base_url,
+                "role_id": "r_test",
+                "name": "测试角色",
+                "token": token or self.TOKEN,
+            }, handle, ensure_ascii=False)
+        return path
 
     def make_ctx(self, with_push=True, config=None):
         ctx = {
@@ -221,8 +246,10 @@ class PluginTestBase(unittest.TestCase):
             ctx["config"] = config
         return ctx
 
-    def make_plugin(self, with_push=True, config=None, **cfg_overrides):
+    def make_plugin(self, with_push=True, config=None, paired=True, **cfg_overrides):
         self.write_config(self.config(**cfg_overrides))
+        if paired:
+            self.seed_role()
         plugin = index.create(self.make_ctx(with_push=with_push, config=config))
         self.plugins.append(plugin)
         return plugin
@@ -245,6 +272,14 @@ class PluginTestBase(unittest.TestCase):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if len(self.events) >= count:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def wait_for(self, predicate, timeout=4.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
                 return True
             time.sleep(0.05)
         return False
@@ -278,12 +313,59 @@ class PluginTestBase(unittest.TestCase):
         self.assertEqual(self.server.calls, [])
         self.assertTrue(plugin.stop(), "启动失败后没有线程，应能正常释放")
 
-    def test_start_requires_pairing_token_and_stays_silent(self):
-        plugin = self.make_plugin(pairing_token="")
-        with self.assertRaises(index.TownUnavailable):
+    def test_start_requires_pairing_or_code(self):
+        plugin = self.make_plugin(paired=False)
+        with self.assertRaises(index.TownUnavailable) as ctx:
             plugin.start()
-        self.assertEqual(self.server.calls, [], "缺令牌时不得匿名发送")
+        self.assertIn("pairing_code", str(ctx.exception))
+        self.assertEqual(self.server.calls, [], "没有配对依据时不得发送任何请求")
         self.assertTrue(plugin.stop())
+
+    def test_claim_with_code_pairs_and_persists(self):
+        plugin = self.make_plugin(paired=False, pairing_code="GOODCODE")
+        plugin.start()
+        self.assertTrue(
+            self.wait_for(lambda: len(self.server.calls_to("/v1/pair/claim")) >= 1),
+            "应当用接入码去兑换令牌",
+        )
+        claim = self.server.calls_to("/v1/pair/claim")[0][4]
+        self.assertEqual(claim["code"], "GOODCODE")
+        self.assertEqual(claim["agent_id"], "test-bot", "Agent 身份应取自宿主 ctx，而不是用户填写")
+
+        role_path = os.path.join(self.data_dir, index.PLUGIN_NAME, "role.json")
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and not os.path.isfile(role_path):
+            time.sleep(0.05)
+        self.assertTrue(os.path.isfile(role_path), "兑换成功后应把角色与令牌落盘")
+        with open(role_path, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+        self.assertEqual(stored["token"], "token-from-claim")
+        self.assertEqual(stored["role_id"], "r_claimed")
+        self.assertTrue(self.stop_fully(plugin))
+
+    def test_bad_code_stops_retrying_and_reports(self):
+        plugin = self.make_plugin(paired=False, pairing_code="EXPIRED1")
+        plugin.start()
+        self.assertTrue(self.wait_for(lambda: len(self.server.calls_to("/v1/pair/claim")) >= 1))
+        time.sleep(1.2)
+        attempts = len(self.server.calls_to("/v1/pair/claim"))
+        self.assertEqual(attempts, 1, "码无效时不该反复重试")
+        self.assertTrue(any("失败" in str(line) for line in self.logs), self.logs)
+        result = self.tool(plugin, "town_act").handler(action="wait")
+        self.assertIn("未准入", result)
+        self.assertTrue(self.stop_fully(plugin))
+
+    def test_restart_reuses_stored_role_without_code(self):
+        first = self.make_plugin(pairing_code="GOODCODE")
+        first.start()
+        self.assertTrue(self.stop_fully(first))
+
+        module = index
+        second = module.create(self.make_ctx())
+        self.plugins.append(second)
+        second.start()  # 没有 pairing_code，但有 role.json
+        self.assertTrue(self.wait_for(lambda: len(self.events) >= 1), "重启后应能继续收到观察")
+        self.assertTrue(self.stop_fully(second))
 
     def test_rejects_unsafe_service_url(self):
         for bad in ("file:///tmp/x", "http://user:pass@host/", "ftp://host", "http://host/?a=1"):
@@ -404,7 +486,8 @@ class PluginTestBase(unittest.TestCase):
 
     def test_ctx_config_overrides_file(self):
         ctx_config = self.config(poll_interval_seconds=5)
-        self.write_config({"service_url": "http://127.0.0.1:1", "pairing_token": "x"})
+        self.write_config({"service_url": "http://127.0.0.1:1", "pairing_code": ""})
+        self.seed_role(service_url=ctx_config["service_url"])
         plugin = index.create(self.make_ctx(config=ctx_config))
         self.plugins.append(plugin)
         plugin.start()

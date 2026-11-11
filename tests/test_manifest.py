@@ -137,9 +137,11 @@ class ConfigPageTest(unittest.TestCase):
         self.assertNotIn("xmlhttprequest", lowered)
         self.assertNotIn("navigator.sendbeacon", lowered)
 
-    def test_secret_field_is_not_prefilled(self):
-        self.assertIn('type="password"', self.html)
-        self.assertNotIn("pairing_token\" value=", self.html)
+    def test_pairing_code_field_is_plain_and_not_prefilled(self):
+        # 接入码是用户从网页复制的一次性值，不是长期密钥；页面不应预填任何内容
+        self.assertIn('id="pairing_code"', self.html)
+        self.assertNotIn("pairing_code\" value=", self.html)
+        self.assertNotIn("pairing_token", self.html)
 
 
 class SchemaTest(unittest.TestCase):
@@ -160,13 +162,14 @@ class SchemaTest(unittest.TestCase):
 
     def test_example_matches_schema_and_has_no_secret(self):
         self.assertEqual(set(self.example), set(self.schema["properties"]))
-        self.assertEqual(self.example["pairing_token"], "", "示例配置不得包含真实令牌")
+        self.assertEqual(self.example["pairing_code"], "", "示例配置不得包含可用接入码")
         self.assertNotIn("@", self.example["service_url"], "示例地址不得内嵌账号")
 
-    def test_password_field_marks_write_only(self):
-        token = self.schema["properties"]["pairing_token"]
-        self.assertEqual(token["format"], "password")
-        self.assertTrue(token.get("writeOnly"))
+    def test_no_long_lived_token_in_config_schema(self):
+        # 长期令牌由插件自己在 dataDir/role.json 里保管，配置里只留一次性接入码
+        properties = self.schema["properties"]
+        self.assertIn("pairing_code", properties)
+        self.assertNotIn("pairing_token", properties)
 
 
 class DistributionBoundaryTest(unittest.TestCase):

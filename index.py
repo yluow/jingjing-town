@@ -46,7 +46,7 @@ MAX_FAILURES_KEPT = 100
 #: 默认值只用于 config.json 缺字段时的补齐；启动前会做范围校验（§17 同一代快照）
 DEFAULTS = {
     "service_url": "http://127.0.0.1:8800",
-    "pairing_token": "",
+    "pairing_code": "",
     "poll_interval_seconds": 15,
     "request_timeout_seconds": 8,
     "stop_budget_seconds": 20,
@@ -112,6 +112,10 @@ def _redact(text, secret):
     return text.replace(secret, "***")
 
 
+class _PairingPending(RuntimeError):
+    """还没有令牌：插件已经启动，但配对尚未完成。"""
+
+
 def create(ctx):
     """唯一入口。同步返回原实例，不做 IO、不启动任何后台工作（§3）。"""
     return TownPlugin(ctx)
@@ -132,6 +136,11 @@ class TownPlugin(object):
         self._failure_total = 0
         self._cursor = "0"
         self._cursor_path = None
+        # 配对结果（role_id + token），每个 Bot 实例各一份，存在 dataDir 里
+        self._role = None
+        self._role_path = None
+        self._claim_blocked = False
+        self._next_claim_at = 0.0
 
     # ------------------------------------------------------------------ 日志
 
@@ -139,7 +148,7 @@ class TownPlugin(object):
         log = _ctx_get(self._ctx, "log")
         if not callable(log):
             return
-        token = self._config.get("pairing_token") or ""
+        token = (self._role or {}).get("token") or ""
         parts = []
         for key in sorted(fields):
             value = _redact(str(fields[key]), token)
@@ -220,12 +229,13 @@ class TownPlugin(object):
             raise TownUnavailable("service_url 不应带查询串或片段")
         cfg["service_url"] = url.strip().rstrip("/")
 
-        token = cfg.get("pairing_token")
-        if not isinstance(token, str) or not token.strip():
-            raise TownUnavailable(
-                "未配置 pairing_token：本插件不向小镇服务匿名发送任何内容，请先在配置页配对"
-            )
-        cfg["pairing_token"] = token.strip()
+        token = cfg.get("pairing_code")
+        if token is None:
+            cfg["pairing_code"] = ""
+        elif not isinstance(token, str):
+            raise TownUnavailable("配置项 pairing_code 必须是字符串")
+        else:
+            cfg["pairing_code"] = token.strip().upper()
 
         for key, (low, high) in LIMITS.items():
             value = cfg.get(key)
@@ -258,8 +268,16 @@ class TownPlugin(object):
             if not data_dir:
                 raise TownUnavailable("宿主未提供 dataDir，无法隔离游标与缓存")
             cfg = self._validate_config(self._load_config())
-            cursor_path = os.path.join(str(data_dir), PLUGIN_NAME, "cursor.json")
+            plugin_dir = os.path.join(str(data_dir), PLUGIN_NAME)
+            cursor_path = os.path.join(plugin_dir, "cursor.json")
+            role_path = os.path.join(plugin_dir, "role.json")
             cursor = self._read_cursor(cursor_path)
+            role = self._load_role(role_path, cfg["service_url"])
+            if role is None and not cfg["pairing_code"]:
+                raise TownUnavailable(
+                    "尚未配对：请先在网页 /admin 生成接入码，填进配置项 pairing_code；"
+                    "如果你已经配对过，检查插件运行目录里的 role.json 是否还在"
+                )
         except BaseException:
             with self._lock:
                 self._state = "failed"
@@ -270,6 +288,8 @@ class TownPlugin(object):
             self._config = cfg
             self._cursor_path = cursor_path
             self._cursor = cursor
+            self._role = role
+            self._role_path = role_path
             self._worker = worker  # 先登记再 start：任何时刻都能回答"谁拥有这个线程"
             self._admission = True
             self._stop_evt.clear()
@@ -287,6 +307,7 @@ class TownPlugin(object):
             service=cfg["service_url"],
             poll=cfg["poll_interval_seconds"],
             cursor=cursor,
+            paired=bool(role),
         )
 
     def stop(self):
@@ -429,6 +450,93 @@ class TownPlugin(object):
         )
         return [observe_def, act_def, say_def]
 
+    # ---------------------------------------------------------------- 配对
+
+    def _agent_identity(self):
+        """插件用自己所在 Bot 的身份去配对，而不是让用户手填 agent_id。"""
+        name = _ctx_get(self._ctx, "name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        bot_dir = _ctx_get(self._ctx, "botDir")
+        if isinstance(bot_dir, str) and bot_dir.strip():
+            return os.path.basename(bot_dir.strip()) or "infinity-bot"
+        return "infinity-bot"
+
+    def _load_role(self, path, service_url):
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            self._record_failure("role_read", exc)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("service_url") != service_url:
+            # 换了小镇服务，旧令牌不通用；等新的接入码
+            return None
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            return None
+        return payload
+
+    def _write_role(self, role):
+        path = self._role_path
+        if not path:
+            return
+        temp_path = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(role, handle, ensure_ascii=False)
+            try:
+                os.chmod(temp_path, 0o600)
+            except OSError:
+                pass
+            os.replace(temp_path, path)
+        except OSError as exc:
+            self._record_failure("role_write", exc)
+
+    def _claim_if_needed(self):
+        """用接入码换令牌。码无效就停止重试，网络问题下一轮再试。"""
+        if self._role is not None or self._claim_blocked:
+            return
+        code = (self._config.get("pairing_code") or "").strip()
+        if not code:
+            return
+        now = time.monotonic()
+        if now < self._next_claim_at:
+            return
+        self._next_claim_at = now + 3.0
+        identity = self._agent_identity()
+        try:
+            payload = self._http_json(
+                "POST", "/v1/pair/claim",
+                body={"code": code, "agent_id": identity, "agent_label": identity},
+                auth=False,
+            )
+        except _RemoteError as exc:
+            self._record_failure("claim", exc)
+            if "HTTP 4" in str(exc):
+                self._claim_blocked = True
+                self._log("配对失败，停止重试", error=exc)
+            return
+        token = payload.get("pairing_token")
+        role = payload.get("role") if isinstance(payload.get("role"), dict) else {}
+        if not isinstance(token, str) or not token:
+            self._record_failure("claim", _RemoteError("配对响应缺少令牌", unknown=True))
+            self._claim_blocked = True
+            return
+        self._role = {
+            "role_id": role.get("role_id"),
+            "name": role.get("name"),
+            "token": token,
+            "service_url": self._config["service_url"],
+        }
+        self._write_role(self._role)
+        self._log("已完成配对", role=role.get("name"), role_id=role.get("role_id"))
+
     # ------------------------------------------------------------ 出站工作流
 
     def _call(self, kind, payload):
@@ -436,6 +544,11 @@ class TownPlugin(object):
         with self._lock:
             if not self._admission or self._state != "running":
                 return "未准入：插件当前状态为 %s，本次调用没有提交到小镇服务。" % self._state
+            if self._role is None:
+                return (
+                    "未准入：插件还没有完成配对（小镇角色未建立）。"
+                    "请确认配置里的 pairing_code 已填写且未过期，然后重载插件。"
+                )
             task = _Task(kind, payload)
             self._pending[task.task_id] = task  # 派发前登记责任
         self._outbox.put(task)
@@ -482,6 +595,13 @@ class TownPlugin(object):
                     return
                 self._execute(task)
                 continue
+
+            if self._role is None:
+                # 还没配对：先补一次兑换，不做任何出站业务
+                self._claim_if_needed()
+                if self._role is None:
+                    self._stop_evt.wait(0.5)
+                    continue
 
             wait = max(0.05, min(1.0, next_poll - time.monotonic()))
             try:
@@ -587,16 +707,20 @@ class TownPlugin(object):
 
     # ------------------------------------------------------------------ HTTP
 
-    def _http_json(self, method, path, body=None, idempotency_key=None):
+    def _http_json(self, method, path, body=None, idempotency_key=None, auth=True):
         cfg = self._config
         url = cfg["service_url"] + path
         data = None
         timeout = float(cfg["request_timeout_seconds"])
         headers = {
             "Accept": "application/json",
-            "Authorization": "Bearer " + cfg["pairing_token"],
-            "User-Agent": "%s/%s" % (PLUGIN_NAME, "0.1.1"),
+            "User-Agent": "%s/%s" % (PLUGIN_NAME, "0.2.0"),
         }
+        if auth:
+            token = (self._role or {}).get("token")
+            if not token:
+                raise _PairingPending("尚未配对，没有可用令牌")
+            headers["Authorization"] = "Bearer " + token
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=utf-8"

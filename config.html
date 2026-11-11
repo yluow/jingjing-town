@@ -3,26 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>鲸鲸小镇 · 连接配置</title>
+<title>鲸鲸小镇 · 接入配置</title>
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #12141a;
-    --card: #1a1d25;
-    --line: #2b2f3a;
-    --text: #e6e8ee;
-    --muted: #9aa1b1;
-    --accent: #5b9dff;
-    --ok: #47c07a;
-    --warn: #e0a33c;
-    --err: #e46464;
+    --bg: #12141a; --card: #1a1d25; --line: #2b2f3a; --text: #e6e8ee;
+    --muted: #9aa1b1; --accent: #5b9dff; --ok: #47c07a; --warn: #e0a33c; --err: #e46464;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    padding: 16px;
-    background: var(--bg);
-    color: var(--text);
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
     font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   }
   h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
@@ -33,27 +23,16 @@
   label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 13px; }
   label .tag { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
   input {
-    width: 100%;
-    padding: 8px 10px;
-    background: #0f1116;
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    font: inherit;
+    width: 100%; padding: 8px 10px; background: #0f1116; color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; font: inherit;
   }
   input:focus { outline: none; border-color: var(--accent); }
   input:disabled { opacity: .55; }
   .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-  .row { display: flex; gap: 8px; align-items: center; }
-  .row input { flex: 1 1 auto; }
+  .code-input { font-family: Consolas, monospace; letter-spacing: 3px; text-transform: uppercase; }
   button {
-    padding: 8px 14px;
-    border-radius: 8px;
-    border: 1px solid var(--line);
-    background: #232734;
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: #232734; color: var(--text); font: inherit; cursor: pointer;
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
   button:disabled { opacity: .5; cursor: not-allowed; }
@@ -67,7 +46,7 @@
 </head>
 <body>
 <h1>鲸鲸小镇</h1>
-<p class="sub">这里只管理「这个 Bot 如何连到小镇服务」。小镇页面、角色设定与世界观察都在独立的小镇网页里。</p>
+<p class="sub">这里只配置「这个 Bot 怎么连到小镇」。配对由插件用自己所在 Bot 的身份发起，不需要你填 Agent 编号。</p>
 
 <div id="status">正在读取已保存的配置…</div>
 
@@ -80,13 +59,14 @@
   </div>
 
   <div class="field">
-    <label for="pairing_token">配对令牌<span class="tag">私密，不会回显</span></label>
-    <div class="row">
-      <input id="pairing_token" type="password" autocomplete="new-password"
-             placeholder="已保存则留空表示保留原值" disabled>
-      <button id="clear_token" type="button" disabled>清除</button>
-    </div>
-    <p class="hint">在网页里完成配对后由小镇服务签发。留空=保留原值；只有点「清除」才会删除。</p>
+    <label for="pairing_code">接入码<span class="tag">一次性，10 分钟有效</span></label>
+    <input id="pairing_code" class="code-input" type="text" spellcheck="false"
+           autocomplete="off" maxlength="8" placeholder="ABCD2345" disabled>
+    <p class="hint">
+      在网页 <code>/admin</code> 填写账号与显示名，生成 8 位接入码，填到这里。
+      插件启动后会用它兑换令牌，并把令牌存进运行数据目录（<code>&lt;dataDir&gt;/jingjing-town/role.json</code>），
+      以后不需要再填。
+    </p>
   </div>
 
   <div class="field">
@@ -118,7 +98,7 @@
 
   var FIELDS = [
     'service_url',
-    'pairing_token',
+    'pairing_code',
     'poll_interval_seconds',
     'request_timeout_seconds',
     'stop_budget_seconds'
@@ -130,17 +110,14 @@
   };
 
   var revision = null;
-  var snapshot = {};      // 上次读回的值，用来算差异
-  var dirty = false;      // 用户改过未保存的表单
-  var clearToken = false; // 显式清除标记
+  var snapshot = {};
+  var dirty = false;
   var ready = false;
   var pendingSave = false;
 
   var statusEl = document.getElementById('status');
   var saveBtn = document.getElementById('save');
   var reloadBtn = document.getElementById('reload');
-  var tokenInput = document.getElementById('pairing_token');
-  var clearBtn = document.getElementById('clear_token');
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -152,13 +129,11 @@
       var el = document.getElementById(name);
       if (el) { el.disabled = !on; }
     });
-    clearBtn.disabled = !on;
     saveBtn.disabled = !on;
     reloadBtn.disabled = !on;
   }
 
   function post(payload) {
-    // 宿主只接受当前 iframe 的消息；targetOrigin 固定 '*' 是沙箱同源策略下的既有契约
     parent.postMessage(payload, '*');
   }
 
@@ -171,12 +146,12 @@
     var fields = (config && config.fields) || [];
     var values = {};
     fields.forEach(function (field) {
-      if (!field || !Array.isArray(field.path)) { return; }
-      values[field.path.join('.')] = field.value;
+      if (field && Array.isArray(field.path)) {
+        values[field.path.join('.')] = field.value;
+      }
     });
 
     if (dirty) {
-      // 后台刷新不覆盖正在编辑的内容（前端页面异步加载约定）
       setStatus('已保存的配置在别处被更新；为免覆盖你正在编辑的内容，本页未重新填充。点「重新读取」丢弃草稿并刷新。', 'warn');
       ready = true;
       setEnabled(true);
@@ -186,16 +161,12 @@
 
     snapshot = {};
     FIELDS.forEach(function (name) {
-      if (name === 'pairing_token') { return; }
       var value = values[name];
       if (value === undefined || value === null) { value = ''; }
       snapshot[name] = String(value);
       var el = document.getElementById(name);
       if (el) { el.value = snapshot[name]; }
     });
-    // 私密字段不回显：永远留空，留空即保留原值
-    tokenInput.value = '';
-    clearToken = false;
     ready = true;
     setEnabled(true);
     saveBtn.disabled = true;
@@ -205,29 +176,23 @@
   function collectChanges() {
     var changes = [];
     FIELDS.forEach(function (name) {
-      if (name === 'pairing_token') { return; }
       var el = document.getElementById(name);
+      if (!el) { return; }
       var value = (el.value || '').trim();
-      if (value !== snapshot[name]) {
-        if (NUMERIC[name]) {
-          var number = Number(value);
-          var low = NUMERIC[name][0];
-          var high = NUMERIC[name][1];
-          if (!isFinite(number) || Math.floor(number) !== number || number < low || number > high) {
-            throw new Error(name + ' 必须是 ' + low + ' 到 ' + high + ' 之间的整数');
-          }
-          changes.push({ path: [name], value: number });
-        } else {
-          changes.push({ path: [name], value: value });
+      if (name === 'pairing_code') { value = value.toUpperCase(); }
+      if (value === snapshot[name]) { return; }
+      if (NUMERIC[name]) {
+        var number = Number(value);
+        var low = NUMERIC[name][0];
+        var high = NUMERIC[name][1];
+        if (!isFinite(number) || Math.floor(number) !== number || number < low || number > high) {
+          throw new Error(name + ' 必须是 ' + low + ' 到 ' + high + ' 之间的整数');
         }
+        changes.push({ path: [name], value: number });
+      } else {
+        changes.push({ path: [name], value: value });
       }
     });
-
-    if (clearToken) {
-      changes.push({ path: ['pairing_token'], value: '' });
-    } else if (tokenInput.value !== '') {
-      changes.push({ path: ['pairing_token'], value: tokenInput.value });
-    }
     return changes;
   }
 
@@ -251,7 +216,7 @@
   }
 
   window.addEventListener('message', function (event) {
-    if (event.source !== parent) { return; }  // 只信任父框架
+    if (event.source !== parent) { return; }
     var data = event.data;
     if (!data || typeof data !== 'object') { return; }
 
@@ -259,13 +224,10 @@
       applyState(data.config || {});
       return;
     }
-
     if (data.type === 'telyincore:config:saved') {
       pendingSave = false;
       if (data.ok) {
         dirty = false;
-        clearToken = false;
-        tokenInput.value = '';
         setStatus('已保存，正在重新读取…', 'ok');
         requestConfig();
       } else {
@@ -286,24 +248,14 @@
     });
   });
 
-  clearBtn.addEventListener('click', function () {
-    clearToken = true;
-    dirty = true;
-    tokenInput.value = '';
-    saveBtn.disabled = false;
-    setStatus('已标记清除配对令牌，保存后生效。', 'warn');
-  });
-
   saveBtn.addEventListener('click', onSave);
   reloadBtn.addEventListener('click', function () {
     dirty = false;
-    clearToken = false;
     saveBtn.disabled = true;
     setStatus('正在重新读取…');
     requestConfig();
   });
 
-  // 首次读回前禁止编辑；5 秒内没有回执说明本页不是通过宿主配置入口打开的
   setTimeout(function () {
     if (!ready) {
       setStatus('未收到宿主的配置回执。请从 TelyinCore 的插件配置入口打开本页。', 'err');
